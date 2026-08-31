@@ -1297,17 +1297,83 @@ const iso639_lang_t* ghb_iso639_lookup_by_int(int idx)
 
 // Handle for libhb.  Gets set by ghb_backend_init()
 static hb_handle_t * h_scan = NULL;
-static hb_handle_t * h_queue = NULL;
+static hb_handle_t * h_queue[GHB_MAX_SIMULTANEOUS_ENCODES];
 static hb_handle_t * h_live = NULL;
+static ghb_status_t hb_status;
+
+// Per-slot tracking of the currently running job.
+// libhb's sequence_id is per-handle, so we assign our own globally
+// unique id (h_queue_unique_id) and remember the libhb sequence_id for removal.
+static gint ghb_unique_id_counter = 0;
+static gint h_queue_unique_id[GHB_MAX_SIMULTANEOUS_ENCODES];
+static gint h_queue_sequence_id[GHB_MAX_SIMULTANEOUS_ENCODES];
 
 hb_handle_t* ghb_scan_handle(void)
 {
     return h_scan;
 }
 
-hb_handle_t* ghb_queue_handle(void)
+hb_handle_t* ghb_queue_handle(int index)
 {
-    return h_queue;
+    if (index < 0 || index >= GHB_MAX_SIMULTANEOUS_ENCODES)
+        return NULL;
+    return h_queue[index];
+}
+
+int
+ghb_simultaneous_encodes(void)
+{
+    signal_user_data_t *ud = ghb_ud();
+    int count;
+
+    count = ghb_dict_get_int(ud->prefs, "SimultaneousEncodes");
+    if (count < 1)
+        count = 1;
+    if (count > GHB_MAX_SIMULTANEOUS_ENCODES)
+        count = GHB_MAX_SIMULTANEOUS_ENCODES;
+    return count;
+}
+
+int
+ghb_find_free_queue_slot(void)
+{
+    int count = ghb_simultaneous_encodes();
+
+    for (int i = 0; i < count; i++)
+    {
+        if (h_queue[i] != NULL && h_queue_unique_id[i] == 0)
+            return i;
+    }
+    return -1;
+}
+
+int
+ghb_allocate_unique_id(void)
+{
+    return ++ghb_unique_id_counter;
+}
+
+void
+ghb_queue_slot_assign(int slot, gint unique_id, gint sequence_id)
+{
+    if (slot < 0 || slot >= GHB_MAX_SIMULTANEOUS_ENCODES) return;
+    h_queue_unique_id[slot]   = unique_id;
+    h_queue_sequence_id[slot] = sequence_id;
+}
+
+void
+ghb_queue_slot_clear(int slot)
+{
+    if (slot < 0 || slot >= GHB_MAX_SIMULTANEOUS_ENCODES) return;
+    h_queue_unique_id[slot]   = 0;
+    h_queue_sequence_id[slot] = 0;
+}
+
+gint
+ghb_queue_slot_unique_id(int slot)
+{
+    if (slot < 0 || slot >= GHB_MAX_SIMULTANEOUS_ENCODES) return 0;
+    return h_queue_unique_id[slot];
 }
 
 hb_handle_t* ghb_live_handle(void)
@@ -2602,13 +2668,13 @@ ghb_get_title_dict(int title_id)
 int
 ghb_lookup_queue_title_index(int title_id)
 {
-    return lookup_title_index(h_queue, title_id);
+    return lookup_title_index(h_queue[0], title_id);
 }
 
 const hb_title_t*
 ghb_lookup_queue_title(int title_id, int *index)
 {
-    return lookup_title(h_queue, title_id, index);
+    return lookup_title(h_queue[0], title_id, index);
 }
 
 static void
@@ -3558,8 +3624,6 @@ ghb_settings_audio_bitrate(const GhbValue *settings, const char *name)
     return result;
 }
 
-static ghb_status_t hb_status;
-
 void
 ghb_combo_init(signal_user_data_t *ud)
 {
@@ -3585,7 +3649,8 @@ ghb_backend_init(gint debug)
 {
     /* Init libhb */
     h_scan = hb_init( debug );
-    h_queue = hb_init( debug );
+    for (int i = 0; i < GHB_MAX_SIMULTANEOUS_ENCODES; i++)
+        h_queue[i] = hb_init( debug );
     h_live = hb_init( debug );
 }
 
@@ -3593,7 +3658,8 @@ void
 ghb_log_level_set(int level)
 {
     hb_log_level_set(h_scan, level);
-    hb_log_level_set(h_queue, level);
+    for (int i = 0; i < GHB_MAX_SIMULTANEOUS_ENCODES; i++)
+        hb_log_level_set(h_queue[i], level);
     hb_log_level_set(h_live, level);
 }
 
@@ -3602,8 +3668,11 @@ ghb_backend_close (void)
 {
     if (h_live != NULL)
         hb_close(&h_live);
-    if (h_queue != NULL)
-        hb_close(&h_queue);
+    for (int i = 0; i < GHB_MAX_SIMULTANEOUS_ENCODES; i++)
+    {
+        if (h_queue[i] != NULL)
+            hb_close(&h_queue[i]);
+    }
     if (h_scan != NULL)
         hb_close(&h_scan);
     hb_global_close();
@@ -3706,7 +3775,11 @@ ghb_get_scan_state (void)
 gint
 ghb_get_queue_state (void)
 {
-    return hb_status.queue.state;
+    gint state = 0;
+    int count = ghb_simultaneous_encodes();
+    for (int i = 0; i < count; i++)
+        state |= hb_status.queue[i].state;
+    return state;
 }
 
 void
@@ -3722,9 +3795,10 @@ ghb_clear_live_state(gint state)
 }
 
 void
-ghb_clear_queue_state(gint state)
+ghb_clear_queue_state(int slot, gint state)
 {
-    hb_status.queue.state &= ~state;
+    if (slot < 0 || slot >= GHB_MAX_SIMULTANEOUS_ENCODES) return;
+    hb_status.queue[slot].state &= ~state;
 }
 
 void
@@ -3734,9 +3808,10 @@ ghb_set_scan_state(gint state)
 }
 
 void
-ghb_set_queue_state(gint state)
+ghb_set_queue_state(int slot, gint state)
 {
-    hb_status.queue.state |= state;
+    if (slot < 0 || slot >= GHB_MAX_SIMULTANEOUS_ENCODES) return;
+    hb_status.queue[slot].state |= state;
 }
 
 void
@@ -3855,8 +3930,11 @@ ghb_track_status (void)
     if (h_scan == NULL) return;
     hb_get_state( h_scan, &state );
     update_status(&state, &hb_status.scan);
-    hb_get_state( h_queue, &state );
-    update_status(&state, &hb_status.queue);
+    for (int i = 0; i < GHB_MAX_SIMULTANEOUS_ENCODES; i++)
+    {
+        hb_get_state( h_queue[i], &state );
+        update_status(&state, &hb_status.queue[i]);
+    }
     hb_get_state( h_live, &state );
     update_status(&state, &hb_status.live);
 }
@@ -4814,27 +4892,36 @@ ghb_remove_job(gint unique_id)
     hb_job_t * job;
     gint ii;
 
-    // Multiples passes all get the same id
-    // remove them all.
-    // Go backwards through list, so reordering doesn't screw me.
-    ii = hb_count(h_queue) - 1;
-    while ((job = hb_job(h_queue, ii--)) != NULL)
+    for (int slot = 0; slot < GHB_MAX_SIMULTANEOUS_ENCODES; slot++)
     {
-        if (job->sequence_id == unique_id)
-            hb_rem(h_queue, job);
+        if (h_queue_unique_id[slot] != unique_id)
+            continue;
+
+        // Multiples passes all get the same id
+        // remove them all.
+        // Go backwards through list, so reordering doesn't screw me.
+        gint sequence_id = h_queue_sequence_id[slot];
+        ii = hb_count(h_queue[slot]) - 1;
+        while ((job = hb_job(h_queue[slot], ii--)) != NULL)
+        {
+            if (job->sequence_id == sequence_id)
+                hb_rem(h_queue[slot], job);
+        }
     }
 }
 
 void
-ghb_start_queue (void)
+ghb_start_queue (int slot)
 {
-    hb_start( h_queue );
+    if (slot < 0 || slot >= GHB_MAX_SIMULTANEOUS_ENCODES) return;
+    hb_start( h_queue[slot] );
 }
 
 void
 ghb_stop_queue (void)
 {
-    hb_stop( h_queue );
+    for (int i = 0; i < ghb_simultaneous_encodes(); i++)
+        hb_stop( h_queue[i] );
 }
 
 void
@@ -4852,31 +4939,37 @@ ghb_stop_live_encode (void)
 void
 ghb_pause_queue (void)
 {
-    hb_status.queue.state |= GHB_STATE_PAUSED;
-    hb_pause( h_queue );
+    for (int i = 0; i < ghb_simultaneous_encodes(); i++)
+    {
+        hb_status.queue[i].state |= GHB_STATE_PAUSED;
+        hb_pause( h_queue[i] );
+    }
 }
 
 void
 ghb_resume_queue (void)
 {
-    hb_status.queue.state &= ~GHB_STATE_PAUSED;
-    hb_resume( h_queue );
+    for (int i = 0; i < ghb_simultaneous_encodes(); i++)
+    {
+        hb_status.queue[i].state &= ~GHB_STATE_PAUSED;
+        hb_resume( h_queue[i] );
+    }
 }
 
 void
 ghb_pause_resume_queue (void)
 {
-    hb_state_t s;
-    hb_get_state2( h_queue, &s );
+    gboolean any_paused = FALSE;
 
-    if( s.state == HB_STATE_PAUSED )
+    for (int i = 0; i < ghb_simultaneous_encodes(); i++)
     {
+        if (hb_status.queue[i].state & GHB_STATE_PAUSED)
+            any_paused = TRUE;
+    }
+    if (any_paused)
         ghb_resume_queue();
-    }
     else
-    {
         ghb_pause_queue();
-    }
 }
 
 GdkPixbuf*

@@ -27,6 +27,8 @@
 
 G_BEGIN_DECLS
 
+#define GHB_MAX_SIMULTANEOUS_ENCODES 8
+
 enum
 {
     GHB_ERROR_NONE,
@@ -63,8 +65,8 @@ typedef struct
 typedef struct
 {
     ghb_instance_status_t scan;
-    ghb_instance_status_t queue;
     ghb_instance_status_t live;
+    ghb_instance_status_t queue[GHB_MAX_SIMULTANEOUS_ENCODES];
 } ghb_status_t;
 
 #define MOD_ROUND(v,m) ((m==1)?v:(m * ((v + (m>>1)) / m)))
@@ -102,7 +104,7 @@ hb_list_t *ghb_get_excluded_extensions_list(void);
 void ghb_free_list(hb_list_t *list);
 int  ghb_add_job(hb_handle_t *h, GhbValue *js);
 void ghb_remove_job(gint unique_id);
-void ghb_start_queue(void);
+void ghb_start_queue(int slot);
 void ghb_stop_queue(void);
 void ghb_pause_queue(void);
 void ghb_resume_queue(void);
@@ -112,11 +114,11 @@ void ghb_start_live_encode(void);
 void ghb_stop_live_encode(void);
 
 void ghb_set_scan_state(gint state);
-void ghb_set_queue_state(gint state);
+void ghb_set_queue_state(int slot, gint state);
 void ghb_set_live_state(gint state);
 
 void ghb_clear_scan_state(gint state);
-void ghb_clear_queue_state(gint state);
+void ghb_clear_queue_state(int slot, gint state);
 void ghb_clear_live_state(gint state);
 
 void ghb_set_state(gint state);
@@ -238,8 +240,14 @@ hb_subtitle_t* ghb_get_subtitle_info(const hb_title_t *title, gint track);
 char * ghb_get_display_aspect_string(double disp_width, double disp_height);
 
 hb_handle_t* ghb_scan_handle(void);
-hb_handle_t* ghb_queue_handle(void);
+hb_handle_t* ghb_queue_handle(int index);
 hb_handle_t* ghb_live_handle(void);
+int ghb_simultaneous_encodes(void);
+int ghb_find_free_queue_slot(void);
+int ghb_allocate_unique_id(void);
+void ghb_queue_slot_assign(int slot, gint unique_id, gint sequence_id);
+void ghb_queue_slot_clear(int slot);
+gint ghb_queue_slot_unique_id(int slot);
 gchar* ghb_create_title_label(const hb_title_t *title);
 gchar* ghb_create_source_label(const hb_title_t * title);
 gchar* ghb_create_volume_label(const hb_title_t * title);
