@@ -4200,7 +4200,7 @@ start_new_log(signal_user_data_t *ud, GhbValue *uiDict)
 }
 
 static void
-submit_job(signal_user_data_t *ud, GhbValue *queueDict)
+submit_job(signal_user_data_t *ud, GhbValue *queueDict, int slot)
 {
     const char *name, *type, *modified;
     GhbValue *uiDict;
@@ -4218,11 +4218,13 @@ submit_job(signal_user_data_t *ud, GhbValue *queueDict)
     ghb_dict_set_int(uiDict, "job_status", GHB_QUEUE_RUNNING);
     start_new_log(ud, uiDict);
     GhbValue *job_dict = ghb_dict_get(queueDict, "Job");
-    int unique_id = ghb_add_job(ghb_queue_handle(), job_dict);
+    int sequence_id = ghb_add_job(ghb_queue_handle(slot), job_dict);
+    int unique_id = ghb_allocate_unique_id();
+    ghb_queue_slot_assign(slot, unique_id, sequence_id);
     ghb_dict_set_int(uiDict, "job_unique_id", unique_id);
     time_t now = time(NULL);
     ghb_dict_set_int(uiDict, "job_start_time", now);
-    ghb_start_queue();
+    ghb_start_queue(slot);
 
     // Show queue progress bar
     int index = ghb_find_queue_job(ud->queue, unique_id, NULL);
@@ -4332,25 +4334,30 @@ ghb_start_next_job(signal_user_data_t *ud)
     count = ghb_array_len(ud->queue);
     for (ii = 0; ii < count; ii++)
     {
-
         queueDict = ghb_array_get(ud->queue, ii);
         uiDict = ghb_dict_get(queueDict, "uiSettings");
         status = ghb_dict_get_int(uiDict, "job_status");
         if (status == GHB_QUEUE_PENDING)
         {
+            int slot = ghb_find_free_queue_slot();
+            if (slot < 0)
+                break; // No free encoder slots left
             inhibit_suspend();
-            submit_job(ud, queueDict);
-            ghb_update_pending(ud);
-            return;
+            submit_job(ud, queueDict, slot);
         }
     }
-    // Nothing pending
-    uninhibit_suspend();
-    ghb_send_notification(GHB_NOTIFY_QUEUE_DONE, 0, ud);
-    queue_done_action(ud);
     ghb_update_pending(ud);
-    gtk_widget_set_visible(progress, FALSE);
-    ghb_reset_disk_space_check();
+
+    // Nothing pending
+    if (queue_pending_count(ud->queue) == 0)
+    {
+        uninhibit_suspend();
+        ghb_send_notification(GHB_NOTIFY_QUEUE_DONE, 0, ud);
+        queue_done_action(ud);
+        ghb_update_pending(ud);
+        gtk_widget_set_visible(progress, FALSE);
+        ghb_reset_disk_space_check();
+    }
 }
 
 static gchar*
@@ -4559,8 +4566,6 @@ ghb_backend_events(signal_user_data_t *ud)
     gchar          * status_str;
     GtkProgressBar * progress;
     GtkLabel       * work_status;
-    GhbValue       * queueDict = NULL;
-    gint             index = -1;
     static gint      prev_scan_state = -1;
     static gint      prev_queue_state = -1;
     static gint      event_sequence = 0;
@@ -4568,17 +4573,19 @@ ghb_backend_events(signal_user_data_t *ud)
     event_sequence++;
     ghb_track_status();
     ghb_get_status(&status);
+
+    gint queue_state = ghb_get_queue_state();
     if (prev_scan_state != status.scan.state ||
-        prev_queue_state != status.queue.state)
+        prev_queue_state != queue_state)
     {
         ghb_queue_buttons_grey(ud);
         prev_scan_state = status.scan.state;
-        prev_queue_state = status.queue.state;
+        prev_queue_state = queue_state;
     }
     progress = GTK_PROGRESS_BAR(ghb_builder_widget("progressbar"));
     work_status = GTK_LABEL(ghb_builder_widget("work_status"));
     if (status.scan.state == GHB_STATE_IDLE &&
-        status.queue.state == GHB_STATE_IDLE)
+        queue_state == GHB_STATE_IDLE)
     {
         static gboolean prev_dvdnav;
         gboolean dvdnav = ghb_dict_get_bool(ud->prefs, "use_dvdnav");
@@ -4669,119 +4676,151 @@ ghb_backend_events(signal_user_data_t *ud)
         }
     }
 
-    if (status.queue.unique_id != 0)
+    // Handle the status of each queue slot.
+    gboolean any_done = FALSE;
+    int nslots = ghb_simultaneous_encodes();
+    for (int slot = 0; slot < nslots; slot++)
     {
-        index = ghb_find_queue_job(ud->queue, status.queue.unique_id,
-                                   &queueDict);
-        if ((status.queue.state & GHB_STATE_WORKING) &&
-            !(status.queue.state & GHB_STATE_PAUSED) &&
-            (event_sequence % 50 == 0)) // check every 10 seconds
-        {
-            ghb_low_disk_check(ud);
-        }
-    }
+        ghb_instance_status_t *qs = &status.queue[slot];
+        GhbValue *queueDict = NULL;
+        gint index = -1;
 
-    if (status.queue.state & GHB_STATE_SCANNING)
-    {
-        // This needs to be in scanning and working since scanning
-        // happens fast enough that it can be missed
-        gtk_label_set_text(work_status, _("Scanning ..."));
-        gtk_progress_bar_set_fraction(progress, status.queue.progress);
-        ghb_queue_update_live_stats(ud, index, &status.queue);
-        ghb_queue_progress_set_fraction(ud, index, status.queue.progress);
-    }
-    else if (status.queue.state & GHB_STATE_SCANDONE)
-    {
-        ghb_clear_queue_state(GHB_STATE_SCANDONE);
-    }
-    else if (status.queue.state & GHB_STATE_PAUSED)
-    {
-        gtk_label_set_text (work_status, _("Paused"));
-        ghb_queue_update_live_stats(ud, index, &status.queue);
-    }
-    else if (status.queue.state & GHB_STATE_SEARCHING)
-    {
-        status_str = searching_status_string(ud, &status.queue);
-        gtk_label_set_text (work_status, status_str);
-        gtk_progress_bar_set_fraction(progress, status.queue.progress);
-        ghb_queue_progress_set_fraction(ud, index, status.queue.progress);
-        g_free(status_str);
-    }
-    else if (status.queue.state & GHB_STATE_WORKING)
-    {
-        status_str = working_status_string(ud, &status.queue);
-        gtk_label_set_text (work_status, status_str);
-        gtk_progress_bar_set_fraction (progress, status.queue.progress);
-        ghb_queue_update_live_stats(ud, index, &status.queue);
-        ghb_queue_progress_set_fraction(ud, index, status.queue.progress);
-        g_free(status_str);
-    }
-    else if (status.queue.state & GHB_STATE_WORKDONE)
-    {
-        gint qstatus;
-
-        switch (status.queue.error)
+        gint unique_id = ghb_queue_slot_unique_id(slot);
+        if (unique_id != 0)
         {
-            case GHB_ERROR_NONE:
-                gtk_label_set_text(work_status, _("Encode Done!"));
-                qstatus = GHB_QUEUE_DONE;
-                send_to_external_app(index, ud);
-                ghb_send_notification (GHB_NOTIFY_ITEM_DONE, index, ud);
-                break;
-            case GHB_ERROR_CANCELED:
-                gtk_label_set_text(work_status, _("Encode Canceled."));
-                qstatus = GHB_QUEUE_CANCELED;
-                break;
-            case GHB_ERROR_FAIL:
-            default:
-                gtk_label_set_text(work_status, _("Encode Failed."));
-                ghb_send_notification (GHB_NOTIFY_ITEM_FAILED, index, ud);
-                qstatus = GHB_QUEUE_FAIL;
+            index = ghb_find_queue_job(ud->queue, unique_id, &queueDict);
+            if ((qs->state & GHB_STATE_WORKING) &&
+                !(qs->state & GHB_STATE_PAUSED) &&
+                (event_sequence % 50 == 0)) // check every 10 seconds
+            {
+                ghb_low_disk_check(ud, unique_id);
+            }
         }
-        if (queueDict != NULL)
-        {
-            GhbValue *uiDict = ghb_dict_get(queueDict, "uiSettings");
-            ghb_dict_set_int(uiDict, "job_status", qstatus);
-            time_t now = time(NULL);
-            ghb_dict_set_int(uiDict, "job_finish_time", now);
-            ghb_dict_set_int(uiDict, "job_pause_time_ms", status.queue.paused);
-        }
-        ghb_queue_update_live_stats(ud, index, &status.queue);
-        gtk_progress_bar_set_fraction(progress, 1.0);
-        ghb_queue_item_set_status(ud, index, qstatus);
-        ghb_queue_progress_set_fraction(ud, index, 1.0);
 
-        ghb_clear_queue_state(GHB_STATE_WORKDONE);
+        if (qs->state & GHB_STATE_SCANNING)
+        {
+            // This needs to be in scanning and working since scanning
+            // happens fast enough that it can be missed
+            gtk_label_set_text(work_status, _("Scanning ..."));
+            gtk_progress_bar_set_fraction(progress, qs->progress);
+            ghb_queue_update_live_stats(ud, index, qs);
+            ghb_queue_progress_set_fraction(ud, index, qs->progress);
+        }
+        else if (qs->state & GHB_STATE_SCANDONE)
+        {
+            ghb_clear_queue_state(slot, GHB_STATE_SCANDONE);
+        }
+        else if (qs->state & GHB_STATE_PAUSED)
+        {
+            gtk_label_set_text(work_status, _("Paused"));
+            ghb_queue_update_live_stats(ud, index, qs);
+        }
+        else if (qs->state & GHB_STATE_SEARCHING)
+        {
+            status_str = searching_status_string(ud, qs);
+            gtk_label_set_text(work_status, status_str);
+            gtk_progress_bar_set_fraction(progress, qs->progress);
+            ghb_queue_progress_set_fraction(ud, index, qs->progress);
+            g_free(status_str);
+        }
+        else if (qs->state & GHB_STATE_WORKING)
+        {
+            status_str = working_status_string(ud, qs);
+            gtk_label_set_text(work_status, status_str);
+            gtk_progress_bar_set_fraction(progress, qs->progress);
+            ghb_queue_update_live_stats(ud, index, qs);
+            ghb_queue_progress_set_fraction(ud, index, qs->progress);
+            g_free(status_str);
+        }
+        else if (qs->state & GHB_STATE_WORKDONE)
+        {
+            gint qstatus;
+
+            switch (qs->error)
+            {
+                case GHB_ERROR_NONE:
+                    gtk_label_set_text(work_status, _("Encode Done!"));
+                    qstatus = GHB_QUEUE_DONE;
+                    send_to_external_app(index, ud);
+                    ghb_send_notification(GHB_NOTIFY_ITEM_DONE, index, ud);
+                    break;
+                case GHB_ERROR_CANCELED:
+                    gtk_label_set_text(work_status, _("Encode Canceled."));
+                    qstatus = GHB_QUEUE_CANCELED;
+                    break;
+                case GHB_ERROR_FAIL:
+                default:
+                    gtk_label_set_text(work_status, _("Encode Failed."));
+                    ghb_send_notification(GHB_NOTIFY_ITEM_FAILED, index, ud);
+                    qstatus = GHB_QUEUE_FAIL;
+            }
+            if (queueDict != NULL)
+            {
+                GhbValue *uiDict = ghb_dict_get(queueDict, "uiSettings");
+                ghb_dict_set_int(uiDict, "job_status", qstatus);
+                time_t now = time(NULL);
+                ghb_dict_set_int(uiDict, "job_finish_time", now);
+                ghb_dict_set_int(uiDict, "job_pause_time_ms", qs->paused);
+            }
+            ghb_queue_update_live_stats(ud, index, qs);
+            gtk_progress_bar_set_fraction(progress, 1.0);
+            ghb_queue_item_set_status(ud, index, qstatus);
+            ghb_queue_progress_set_fraction(ud, index, 1.0);
+
+            ghb_clear_queue_state(slot, GHB_STATE_WORKDONE);
+            ghb_queue_slot_clear(slot);
 
 #ifdef __GLIBC__
-        malloc_trim(0);
+            malloc_trim(0);
 #endif
 
-        if (ud->job_activity_log)
-            g_io_channel_unref(ud->job_activity_log);
-        ud->job_activity_log = NULL;
-        if (ghb_dict_get_bool(ud->prefs, "RemoveFinishedJobs") &&
-            status.queue.error == GHB_ERROR_NONE)
-        {
-            ghb_queue_remove_row_at_index(index);
+            if (ghb_dict_get_bool(ud->prefs, "RemoveFinishedJobs") &&
+                qs->error == GHB_ERROR_NONE)
+            {
+                ghb_queue_remove_row_at_index(index);
+            }
+            any_done = TRUE;
         }
-        if (ghb_get_cancel_status() != GHB_CANCEL_ALL &&
-            ghb_get_cancel_status() != GHB_CANCEL_FINISH)
+        else if (qs->state & GHB_STATE_MUXING)
+        {
+            gtk_label_set_text(work_status, _("Muxing: This may take a while..."));
+        }
+    }
+
+    if (any_done)
+    {
+        gboolean any_working = FALSE;
+        for (int slot = 0; slot < nslots; slot++)
+        {
+            if (status.queue[slot].state & (GHB_STATE_WORKING | GHB_STATE_SEARCHING |
+                                            GHB_STATE_PAUSED | GHB_STATE_MUXING))
+            {
+                any_working = TRUE;
+                break;
+            }
+        }
+
+        // The activity log is shared, so only clear it when nothing remains running.
+        if (!any_working && ud->job_activity_log)
+        {
+            g_io_channel_unref(ud->job_activity_log);
+            ud->job_activity_log = NULL;
+        }
+
+        int cancel_status = ghb_get_cancel_status();
+        if (cancel_status != GHB_CANCEL_ALL &&
+            cancel_status != GHB_CANCEL_FINISH)
         {
             ghb_start_next_job(ud);
         }
-        else
+        else if (!any_working)
         {
             uninhibit_suspend();
             gtk_widget_set_visible(GTK_WIDGET(progress), FALSE);
             ghb_reset_disk_space_check();
+            ghb_set_cancel_status(GHB_CANCEL_NONE);
         }
         ghb_save_queue(ud->queue);
-        ghb_set_cancel_status(GHB_CANCEL_NONE);
-    }
-    else if (status.queue.state & GHB_STATE_MUXING)
-    {
-        gtk_label_set_text (work_status, _("Muxing: This may take a while..."));
     }
 
     if (status.live.state & GHB_STATE_WORKING)

@@ -1565,11 +1565,10 @@ low_disk_check_response_cb (GtkDialog *dialog, int response,
     }
 }
 
-void ghb_low_disk_check (signal_user_data_t *ud)
+void ghb_low_disk_check (signal_user_data_t *ud, gint unique_id)
 {
     GtkWindow       *hb_window;
     GtkWidget       *dialog, *cancel;
-    ghb_status_t     status;
     const char      *dest;
     gint64           free_size;
     gint64           free_limit;
@@ -1581,13 +1580,12 @@ void ghb_low_disk_check (signal_user_data_t *ud)
         return;
     }
 
-    ghb_get_status(&status);
-    if (status.queue.unique_id <= 0)
+    if (unique_id <= 0)
     {
         // No current job
         return;
     }
-    ghb_find_queue_job(ud->queue, status.queue.unique_id, &qDict);
+    ghb_find_queue_job(ud->queue, unique_id, &qDict);
     if (qDict == NULL)
     {
         // Failed to find queue setting!

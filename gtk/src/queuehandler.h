@@ -31,7 +31,7 @@ gboolean ghb_reload_queue(signal_user_data_t *ud);
 void     ghb_queue_remove_row(GhbQueueRow *row);
 void     ghb_queue_remove_row_at_index(int row);
 gint     ghb_find_queue_job(GhbValue *queue, gint unique_id, GhbValue **job);
-void     ghb_low_disk_check(signal_user_data_t *ud);
+void     ghb_low_disk_check(signal_user_data_t *ud, gint unique_id);
 void     ghb_reset_disk_space_check(void);
 void     ghb_queue_item_set_status(signal_user_data_t *ud, int index,
                                    int status);

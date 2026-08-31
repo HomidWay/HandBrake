@@ -74,6 +74,7 @@
         "DiskFreeCheck": true,
         "DiskFreeLimitGB": 2,
         "RemoveFinishedJobs": false,
+        "SimultaneousEncodes": 1,
         "SyncTitleSettings": true,
         "AutoScan": false,
         "AddCC": false,

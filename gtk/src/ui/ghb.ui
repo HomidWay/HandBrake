@@ -1277,6 +1277,12 @@ Resets the queue job to pending and ready to run again.</property>
     <property name="step-increment">1</property>
     <property name="page-increment">10</property>
   </object>
+  <object class="GtkAdjustment" id="SimultaneousEncodesAdjustment">
+    <property name="lower">1</property>
+    <property name="upper">8</property>
+    <property name="step-increment">1</property>
+    <property name="page-increment">1</property>
+  </object>
   <object class="GtkAdjustment" id="ActivityFontSizeAdjustment">
     <property name="upper">32</property>
     <property name="lower">6</property>
@@ -5796,6 +5802,30 @@ Uncheck this if you want to allow changing each title&apos;s settings independen
   Check this if you want the queue to clean itself up by deleting completed jobs.</property>
                             <property name="halign">start</property>
                             <signal name="toggled" handler="pref_changed_cb" swapped="no"/>
+                          </object>
+                        </child>
+                        <child>
+                          <object class="GtkBox">
+                            <property name="spacing">6</property>
+                            <child>
+                              <object class="GtkLabel" id="simultaneous_encodes_label">
+                                <property name="label" translatable="yes">Maximum simultaneous encodes:</property>
+                                <property name="halign">start</property>
+                                <property name="margin-start">4</property>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSpinButton" id="SimultaneousEncodes">
+                                <property name="focusable">1</property>
+                                <property name="width-chars">4</property>
+                                <property name="adjustment">SimultaneousEncodesAdjustment</property>
+                                <property name="numeric">1</property>
+                                <signal name="value-changed" handler="pref_changed_cb" swapped="no"/>
+                                <accessibility>
+                                  <relation name="labelled-by">simultaneous_encodes_label</relation>
+                                </accessibility>
+                              </object>
+                            </child>
                           </object>
                         </child>
                         <child>
